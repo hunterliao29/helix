@@ -4,6 +4,7 @@ use crate::{
     job::{self, Callback},
     key,
     keymap::{KeymapResult, Keymaps},
+    mousemap::{Mousemap, Mousemaps},
     ui::{Completion, ProgressSpinners},
 };
 
@@ -25,7 +26,7 @@ use helix_view::{
     keyboard::{KeyCode, KeyModifiers},
     Document, Editor, Theme, View,
 };
-use std::{borrow::Cow, cmp::min, collections::HashMap, num::NonZeroUsize, path::PathBuf};
+use std::{borrow::Cow, cmp::min, num::NonZeroUsize, path::PathBuf};
 
 use tui::buffer::Buffer as Surface;
 
@@ -39,24 +40,9 @@ pub struct EditorView {
     last_insert: (commands::MappableCommand, Vec<InsertEvent>),
     pub(crate) completion: Option<Completion>,
     spinners: ProgressSpinners,
-    mouse_map: HashMap<MouseEventKind, Vec<MouseAreaLogic>>,
+    mousemaps: Mousemaps,
 }
 
-struct MouseAreaLogic {
-    area: Rect,
-    logic: Box<dyn Fn(u16, u16) -> Option<MappableCommand>>,
-}
-impl MouseAreaLogic {
-    fn new(area: Rect, logic: Box<dyn Fn(u16, u16) -> Option<MappableCommand>>) -> Self {
-        Self { area, logic }
-    }
-    fn in_area(&self, row: u16, column: u16) -> bool {
-        self.area.x <= column
-            && self.area.x + self.area.width > column
-            && self.area.y <= row
-            && self.area.y + self.area.height > row
-    }
-}
 #[derive(Debug, Clone)]
 pub enum InsertEvent {
     Key(KeyEvent),
@@ -79,15 +65,7 @@ impl EditorView {
             last_insert: (commands::MappableCommand::normal_mode, Vec::new()),
             completion: None,
             spinners: ProgressSpinners::default(),
-            mouse_map: HashMap::new(),
-        }
-    }
-    fn add_mouse_area_logic(&mut self, kind: MouseEventKind, logic: MouseAreaLogic) {
-        match self.mouse_map.get_mut(&kind) {
-            Some(arr) => arr.push(logic),
-            None => {
-                self.mouse_map.insert(kind, vec![logic]);
-            }
+            mousemaps: Mousemaps::default(),
         }
     }
     pub fn spinners_mut(&mut self) -> &mut ProgressSpinners {
@@ -753,10 +731,9 @@ impl EditorView {
             width: x_end - x_start,
             height: 1,
         };
-        let bufferline_count = bufferline_count.leak();
-        let logic_open = MouseAreaLogic::new(
+        let logic_open = Mousemap::new(
             area,
-            Box::new(|_, column| {
+            Box::new(move |_row, column| {
                 let index = bufferline_count.iter().position(|&x| column == (x - 2));
                 if let Some(index) = index {
                     return Some(MappableCommand::Typable {
@@ -777,7 +754,8 @@ impl EditorView {
                 })
             }),
         );
-        self.add_mouse_area_logic(MouseEventKind::Down(MouseButton::Left), logic_open);
+        self.mousemaps
+            .add_mouse_map(MouseEventKind::Down(MouseButton::Left), logic_open);
     }
 
     pub fn render_gutter(
@@ -1220,12 +1198,7 @@ impl EditorView {
             })
         };
 
-        let has_click_logic = |kind, row, column| match self.mouse_map.get(kind) {
-            Some(click_logics) => click_logics.iter().rev().find(|x| x.in_area(row, column)),
-            None => None,
-        };
-
-        if let Some(click_logic) = has_click_logic(&kind, row, column) {
+        if let Some(click_logic) = self.mousemaps.has_logic(kind, row, column) {
             match (click_logic.logic)(row, column) {
                 Some(cmd) => {
                     cmd.execute(cxt);
@@ -1538,6 +1511,8 @@ impl Component for EditorView {
     }
 
     fn render(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
+        self.mousemaps.clear();
+
         // clear with background color
         surface.set_style(area, cx.editor.theme.get("ui.background"));
         let config = cx.editor.config();
